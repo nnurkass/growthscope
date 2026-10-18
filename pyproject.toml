@@ -1,0 +1,30 @@
+# GrowthScope — packaging and test configuration.
+# Used by pytest today; packaging metadata only becomes relevant once the
+# library API stabilizes.
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "growthscope"
+version = "0.1.0"
+description = "Marketing & growth intelligence for e-commerce, built on the public GA4 BigQuery sample dataset."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+# `authors` is intentionally omitted: this is a public portfolio repository and
+# publishes no personal contact data.
+#
+# `dependencies` is intentionally omitted: direct dependencies are declared once
+# in requirements.txt (`pip install -r requirements.txt`). Duplicating the list
+# here would let the two files drift. Tests do not need an editable install —
+# pytest injects `src/` via `pythonpath` in [tool.pytest.ini_options] below.
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q"

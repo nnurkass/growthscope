@@ -1,0 +1,39 @@
+# GrowthScope — Python dependencies
+# Sprint 01: project foundation & data discovery
+#
+# Python: 3.11+ required (developed and validated on Python 3.12).
+#
+# Install:
+#   python -m venv .venv
+#   .venv\Scripts\Activate.ps1          # Windows PowerShell
+#   source .venv/bin/activate            # macOS / Linux
+#   python -m pip install --upgrade pip
+#   pip install -r requirements.txt
+#
+# Conventions:
+#   - Only direct dependencies are listed. Transitive packages (for example
+#     tzdata, pulled in by pandas) are resolved by pip and are not pinned here.
+#   - Lower bounds only: the project is young and no upper cap is justified yet.
+#     Each line carries a short note on why the package is needed and when.
+
+# --- Core analytics (Sprint 01+) ---
+pandas>=2.1                     # dataframe processing: notebook exploration + data-quality checks
+numpy>=1.26                     # imported directly by src/growthscope/quality/checks.py (dtype/null handling)
+
+# --- BigQuery (Sprint 01 exploration; Sprint 02+ models) ---
+google-cloud-bigquery>=3.11     # client library; queries the public GA4 sample dataset
+db-dtypes>=1.2                  # registers BigQuery NUMERIC/BIGNUMERIC/... types for pandas
+pyarrow>=14.0                   # Arrow engine for BigQuery results + local Parquet fixtures
+
+# --- Notebooks (Sprint 01 data discovery) ---
+jupyterlab>=4.0                 # notebook UI for the exploratory analysis
+ipykernel>=6.25                 # Jupyter kernel bound to this project's virtual environment
+nbformat>=5.9                   # read/validate .ipynb files programmatically
+nbclient>=0.9                   # execute notebooks headless for reproducible checks
+matplotlib>=3.8                 # static summary charts in the discovery notebook
+
+# --- Testing (Sprint 01+) ---
+pytest>=7.4                     # unit tests under tests/ (pythonpath is configured in pyproject.toml)
+
+# --- Configuration (Sprint 01+) ---
+python-dotenv>=1.0              # loads .env (billing project, cost guard) without committing secrets

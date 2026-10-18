@@ -1,0 +1,272 @@
+-- ============================================================================
+-- GROWTHSCOPE - Sprint 01 / Data Discovery (GA4 public sample ecommerce)
+-- FILE      : 00_project_settings.sql
+-- PURPOSE   : Preflight & settings reference for everything in sql/exploration/.
+--             This is NOT an analysis query. It contains:
+--               A. Dataset/table reference and how project substitution works
+--               B. Canonical WINDOW constants used by every other file
+--               C. PREFLIGHT SELECT - which daily shards exist in the window
+--               D. Cost control: dry run, maximum_bytes_billed, byte checks
+--               E. Connection setup (BigQuery Sandbox, bq CLI, Python client)
+--               F. WHY _TABLE_SUFFIX matters (the most important cost lever)
+--               G. How to run the other files, in order
+-- TABLES    : `bigquery-public-data.ga4_obfuscated_sample_ecommerce.events_*`
+-- SCAN RISK : LOW - section C reads only the _TABLE_SUFFIX pseudo-column over
+--             3 shards. The optional wide probe in section C is HIGH (it
+--             touches every shard of the dataset) - it is commented out.
+-- OUTPUT    : Section C: one row per existing shard inside the window
+--             (0..3 rows for the default window; a missing day simply has no
+--             shard). Empty result = the wildcard matched no table there.
+-- CAVEATS   : - The public sample covers 2020-11-01 .. 2021-01-31 (Google
+--               Merchandise Store, web stream, obfuscated). Fields contain
+--               placeholder values (`<Other>`, NULL, '') and internal
+--               consistency is limited by design.
+--               Reference: https://developers.google.com/analytics/bigquery/web-ecommerce-demo-dataset
+--             - Any number produced by these files must come from a real run;
+--               this repository intentionally contains no observed results.
+-- READ-ONLY : SELECT only. No DDL/DML, no temp tables, no exports, no writes.
+-- STATUS    : UNVERIFIED - BigQuery was not available in the build environment.
+-- ============================================================================
+
+
+-- ============================================================================
+-- SECTION A - Dataset / table reference and project substitution
+-- ============================================================================
+-- Fully qualified reference used by every query in this folder:
+--
+--   `bigquery-public-data.ga4_obfuscated_sample_ecommerce.events_*`
+--     \____________/ \_______________________________/ \______/
+--      project       dataset                         table wildcard
+--
+-- - The project here is Google's public data project. You do NOT need a copy
+--   of the dataset in your own project and you do NOT edit this path to run
+--   the files as-is.
+-- - The project that RUNS (and is billed/quota-charged for) the query is
+--   chosen OUTSIDE the SQL: the project selector in BigQuery Studio, the
+--   `--project_id` flag of `bq`, or the `project=` argument of the client
+--   library. That "query project" only needs the BigQuery API enabled.
+-- - The wildcard `events_*` expands to many daily shard tables named
+--   events_YYYYMMDD (for the GA4 export: one table per day). The
+--   `_TABLE_SUFFIX` pseudo-column carries the `YYYYMMDD` part.
+-- - PROJECT SUBSTITUTION: if you ever import the dataset (or your own GA4
+--   export) into `my-project.my_dataset`, replace the whole backticked path
+--   in each query's FROM clause - one location per query, nothing else
+--   changes. `<project>`-style placeholders are deliberately avoided so every
+--   file runs after the reader changes only the date window.
+--
+-- Reference (event schema / export mechanics):
+--   https://support.google.com/analytics/answer/7029846
+
+
+-- ============================================================================
+-- SECTION B - Canonical window constants (single source of truth)
+-- ============================================================================
+-- Default exploration window : 2020-11-01 .. 2020-11-03 (3 days)
+--   window start literal : '20201101'
+--   window end   literal : '20201103'
+--   predicate form       : _TABLE_SUFFIX BETWEEN '20201101' AND '20201103'
+--
+-- These two literals are the ONLY thing a reader changes. Every file repeats
+-- the predicate in this exact form, once per query, so a find/replace of the
+-- two literals updates a whole file. The literal form is intentional: see
+-- section F - a filter that is not a constant expression prunes nothing.
+--
+-- After changing the window:
+--   1) run section C to confirm which shards exist in the new range;
+--   2) dry-run the affected files (section D) before running them for real.
+
+
+-- ============================================================================
+-- SECTION C - PREFLIGHT: which shards exist in the window?
+-- ----------------------------------------------------------------------------
+-- Run this FIRST. It answers "does the window I configured actually contain
+-- data?" by listing the daily shard suffixes the wildcard matched.
+--
+-- Why not INFORMATION_SCHEMA: its availability and permissions vary by dataset
+-- and project (and differ under the Sandbox). `SELECT DISTINCT _TABLE_SUFFIX`
+-- from the wildcard is portable and works anywhere the data itself is
+-- readable. Cost is tiny because the output is only the pseudo-column and the
+-- scan is limited to the window's shards.
+-- ============================================================================
+SELECT DISTINCT
+  _TABLE_SUFFIX AS shard_suffix
+FROM
+  `bigquery-public-data.ga4_obfuscated_sample_ecommerce.events_*`
+WHERE
+  _TABLE_SUFFIX BETWEEN '20201101' AND '20201103' -- [WINDOW]
+ORDER BY
+  shard_suffix;
+
+-- OPTIONAL - discover the FULL shard range of the dataset.
+-- HIGH SCAN RISK: this touches every shard (~3 months for this dataset).
+-- Uncomment only when you need the dataset boundaries (e.g. before picking a
+-- wider window). It is still a constant-expression filter, so only shards
+-- inside the range are read.
+--
+-- SELECT DISTINCT
+--   _TABLE_SUFFIX AS shard_suffix
+-- FROM
+--   `bigquery-public-data.ga4_obfuscated_sample_ecommerce.events_*`
+-- WHERE
+--   _TABLE_SUFFIX BETWEEN '20201101' AND '20210131'
+-- ORDER BY
+--   shard_suffix;
+
+
+-- ============================================================================
+-- SECTION D - Cost control: dry run, maximum_bytes_billed, byte checks
+-- ============================================================================
+-- THE RULE: estimate -> cap -> run. BigQuery bills bytes READ (on-demand).
+-- A single accidental full-dataset scan costs roughly 30x a 3-day scan (~92
+-- daily shards against 3); the cap and
+-- the dry run are how you make that impossible by accident.
+--
+-- (1) DRY RUN - validates the SQL and returns an estimate WITHOUT running or
+--     charging anything (documented: dry runs use no slots and are not billed).
+--     The estimate can be an upper bound in some table layouts.
+--
+--       bq query --use_legacy_sql=false --dry_run \
+--         "$(cat sql/exploration/00_project_settings.sql)"
+--
+--     Output looks like (no numbers are quoted here on purpose):
+--       "Query successfully validated. Assuming the tables are not modified,
+--        running this query will process <N> bytes of data."
+--
+--     In BigQuery Studio (the web console), every valid query shows a check
+--     mark and the estimated bytes as you type - that IS the dry run.
+--
+--     Python equivalent:
+--       job_config = bigquery.QueryJobConfig(dry_run=True, use_query_cache=False)
+--       client.query(sql, job_config=job_config).total_bytes_processed
+--
+-- (2) MAXIMUM BYTES BILLED - a hard cap. Before execution BigQuery estimates
+--     the bytes; if the estimate exceeds the cap the query FAILS WITHOUT
+--     being charged. Set it on every exploration query.
+--
+--       # Console: Query settings -> Maximum bytes billed -> value in bytes
+--       #          (e.g. 1000000000 = 1 GB)
+--       bq query --use_legacy_sql=false \
+--         --maximum_bytes_billed=1000000000 \
+--         "$(cat sql/exploration/01_event_inventory.sql)"
+--
+--       # Python:
+--       #   bigquery.QueryJobConfig(maximum_bytes_billed=1_000_000_000)
+--
+-- (3) CHECK WHAT ACTUALLY HAPPENED
+--     - Console: after a run, open "Job information" for the query job: it
+--       shows the Job ID plus "Bytes processed" (read) and "Bytes billed"
+--       (charged). Use it to sanity-check the estimate.
+--     - CLI: `bq show -j JOB_ID` shows the same job statistics.
+--     - The first bytes shown are the important ones: if "Bytes processed" is
+--       near the whole dataset size, the _TABLE_SUFFIX filter was wrong.
+--
+-- (4) WILDCARD CACHING - the official wildcard-table docs state that cached
+--     results are NOT used for wildcard queries: every identical rerun is
+--     billed again. Estimate before running, don't "just try it".
+--     Reference: https://cloud.google.com/bigquery/docs/querying-wildcard-tables
+
+
+-- ============================================================================
+-- SECTION E - Connection setup (copy/paste)
+-- ============================================================================
+-- E1. BIGQUERY SANDBOX (no credit card required - enough for this dataset;
+--     Google's own sample-dataset guide says the Sandbox / free tier is
+--     sufficient to explore it):
+--       1. Open https://console.cloud.google.com/bigquery and sign in with a
+--          Google account.
+--       2. Accept the Sandbox terms and create a NEW project when prompted
+--          (or pick an existing project without a billing account).
+--       3. In the Explorer pane, open "Add data" > "Public datasets" and
+--          search for `ga4_obfuscated_sample_ecommerce`, or browse:
+--          https://console.cloud.google.com/bigquery?p=bigquery-public-data&d=ga4_obfuscated_sample_ecommerce
+--       4. Paste the contents of any file in sql/exploration/ into the query
+--          editor and click Run.
+--
+--     Sandbox limits (checked 2026; limits can change - verify at
+--     https://cloud.google.com/bigquery/docs/sandbox):
+--       - 1 TiB of processed query data per month (same as the free tier);
+--         the files in this folder only ever read a few daily shards, so the
+--         whole exploration costs a tiny fraction of that.
+--       - 10 GiB lifetime storage (we write nothing).
+--       - Tables/views/partitions expire after 60 days (we only read a public
+--         dataset, so this does not affect us).
+--       - No streaming, no DML statements, no BigQuery Data Transfer Service.
+--         Our files are SELECT-only by design, so the Sandbox fits exactly.
+--
+-- E2. bq CLI (any project with the BigQuery API enabled):
+--       gcloud auth login
+--       gcloud config set project YOUR_PROJECT_ID
+--       bq ls bigquery-public-data:ga4_obfuscated_sample_ecommerce
+--       bq query --use_legacy_sql=false --dry_run \
+--         "$(cat sql/exploration/01_event_inventory.sql)"
+--     Windows PowerShell equivalent for the last command:
+--       bq query --use_legacy_sql=false --dry_run `
+--         (Get-Content sql\exploration\01_event_inventory.sql -Raw)
+--
+-- E3. Python client (most portable; works on macOS/Windows/Linux):
+--       from google.cloud import bigquery
+--
+--       client = bigquery.Client(project="YOUR_PROJECT_ID")  # job project
+--       sql = open("sql/exploration/01_event_inventory.sql", encoding="utf-8").read()
+--       job_config = bigquery.QueryJobConfig(maximum_bytes_billed=1_000_000_000)
+--       job = client.query(sql, job_config=job_config)
+--       rows = list(job.result())            # rows of the LAST statement
+--       print(job.total_bytes_processed)     # actual bytes read
+--     For multi-statement files, see README.md - the REST layer returns only
+--     the last statement's rows, while the console and `bq` show every step.
+
+
+-- ============================================================================
+-- SECTION F - WHY _TABLE_SUFFIX matters (read this once, save money forever)
+-- ============================================================================
+-- The GA4 export is SHARDED: one physical table per day, named events_YYYYMMDD.
+-- The wildcard `events_*` is the union of ALL of them (~3 months for this
+-- public dataset; real properties accumulate years).
+--
+-- BigQuery's on-demand pricing bills the bytes READ. Reading a column means
+-- reading it for every rendered row of every scanned table. Therefore:
+--
+--   1) ALL matching shards are scanned unless the query can PROVE some cannot
+--      match. Only a filter on the `_TABLE_SUFFIX` pseudo-column can prove
+--      that, because the suffix identifies the physical table.
+--
+--   2) The filter must be a CONSTANT expression. The official docs state that
+--      filters on _TABLE_SUFFIX "that include conditions without constant
+--      expressions don't limit the number of tables scanned". This is why the
+--      window is written as two literal strings everywhere in this folder
+--      instead of variables/parameters: a DECLARE'd variable is not (yet) a
+--      constant to the pruner.
+--
+--   3) Filtering on `event_date` does NOT prune shards. `event_date` is a
+--      normal column INSIDE each table: to filter on it, BigQuery must read
+--      the tables first. Same bytes, same bill.
+--
+--       -- DO NOT DO THIS (scans everything, filters afterwards):
+--       -- SELECT COUNT(*)
+--       -- FROM `bigquery-public-data.ga4_obfuscated_sample_ecommerce.events_*`
+--       -- WHERE event_date BETWEEN '20201101' AND '20201103';
+--
+--       -- DO THIS (reads only the 3 default shards):
+--       -- SELECT COUNT(*)
+--       -- FROM `bigquery-public-data.ga4_obfuscated_sample_ecommerce.events_*`
+--       -- WHERE _TABLE_SUFFIX BETWEEN '20201101' AND '20201103';
+--
+--   4) A correct filter is still the whole cost model: on a real property,
+--      one wrong query can read years of events. Always dry-run (section D).
+--
+-- Reference: https://cloud.google.com/bigquery/docs/querying-wildcard-tables
+
+
+-- ============================================================================
+-- SECTION G - How to run the rest of this folder
+-- ============================================================================
+-- Order:  00 (this file) -> 01 -> 02 -> 03 -> 04 -> 05 -> 06 -> 07.
+-- Each file is self-contained (every statement declares its own CTEs) and can
+-- be pasted into BigQuery Studio as a multi-statement script: the console
+-- shows one result set per statement. `bq query` also prints each step; the
+-- REST API (and some client helpers) return only the LAST statement's rows -
+-- see README.md for how to capture per-statement output.
+--
+-- Honesty rule: every result you produce is a measurement of the OBFUSCATED
+-- SAMPLE, not of the real Google Merchandise Store. Label outputs accordingly
+-- and store them in the results log described in README.md.
